@@ -833,18 +833,16 @@ class Issue < ActiveRecord::Base
   end
 
   def attachment_added(obj)
-    attachment_added_or_removed(obj, :value)
+    @current_journal.details << JournalDetail.new(:property => 'attachment',
+                                                  :prop_key => obj.id,
+                                                  :value => obj.filename)
   end
 
   def attachment_removed(obj)
-    attachment_added_or_removed(obj, :old_value)
-  end
-
-  def attachment_added_or_removed(obj, value_key)
     journal = init_journal(User.current)
     journal.details << JournalDetail.new(:property => 'attachment',
                                          :prop_key => obj.id,
-                                         value_key => obj.filename)
+                                         :old_value => obj.filename)
     journal.save
   end
 
