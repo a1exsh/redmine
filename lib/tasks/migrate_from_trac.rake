@@ -64,7 +64,7 @@ namespace :redmine do
         roles = Role.find(:all, :conditions => {:builtin => 0}, :order => 'position ASC')
         manager_role = roles[0]
         developer_role = roles[1]
-        DEFAULT_ROLE = roles.last
+        DEFAULT_ROLE = ENV['DEFAULT_ROLE'].blank? ? roles.last : roles.find { |r| r.name == ENV['DEFAULT_ROLE'] }
         ROLE_MAPPING = {'admin' => manager_role,
                         'developer' => developer_role
                         }
