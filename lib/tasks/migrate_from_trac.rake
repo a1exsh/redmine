@@ -153,8 +153,9 @@ namespace :redmine do
       private
         def trac_fullpath
           attachment_type = read_attribute(:type)
-          trac_file = filename.gsub( /[^a-zA-Z0-9\-_\.!~*']/n ) {|x| sprintf('%%%02x', x[0]) }
-          "#{TracMigrate.trac_attachments_directory}/#{attachment_type}/#{id}/#{trac_file}"
+          trac_file = filename.gsub( /[^a-zA-Z0-9\-_\.!~*]/n ) {|x| sprintf('%%%02X', x[0]) }
+          trac_dir = id.gsub( /[^a-zA-Z0-9\-_\.!~*\\\/]/n ) {|x| sprintf('%%%02X', x[0]) }
+          "#{TracMigrate.trac_attachments_directory}/#{attachment_type}/#{trac_dir}/#{trac_file}"
         end
       end
 
@@ -167,7 +168,7 @@ namespace :redmine do
         has_many :attachments, :class_name => "TracAttachment",
                                :finder_sql => "SELECT DISTINCT attachment.* FROM #{TracMigrate::TracAttachment.table_name}" +
                                               " WHERE #{TracMigrate::TracAttachment.table_name}.type = 'ticket'" +
-                                              ' AND #{TracMigrate::TracAttachment.table_name}.id = \'#{TracMigrate::TracAttachment.connection.quote_string(id.to_s)}\''
+                                              ' AND #{TracMigrate::TracAttachment.table_name}.id = \"#{id}\"'
         has_many :customs, :class_name => "TracTicketCustom", :foreign_key => :ticket
 
         def ticket_type
@@ -192,14 +193,15 @@ namespace :redmine do
         def time; Time.at(read_attribute(:time)) end
       end
 
-      TRAC_WIKI_PAGES = %w(InterMapTxt InterTrac InterWiki RecentChanges SandBox TracAccessibility TracAdmin TracBackup TracBrowser TracCgi TracChangeset \
+      TRAC_WIKI_PAGES = %w(InterMapTxt InterTrac InterWiki RecentChanges SandBox TracAccessibility TracAdmin TracBackup \
+                           TracBrowser TracCgi TracChangeset TracInstallPlatforms TracMultipleProjects TracModWSGI \
                            TracEnvironment TracFastCgi TracGuide TracImport TracIni TracInstall TracInterfaceCustomization \
                            TracLinks TracLogging TracModPython TracNotification TracPermissions TracPlugins TracQuery \
                            TracReports TracRevisionLog TracRoadmap TracRss TracSearch TracStandalone TracSupport TracSyntaxColoring TracTickets \
                            TracTicketsCustomFields TracTimeline TracUnicode TracUpgrade TracWiki WikiDeletePage WikiFormatting \
                            WikiHtml WikiMacros WikiNewPage WikiPageNames WikiProcessors WikiRestructuredText WikiRestructuredTextLinks \
-                           CamelCase TitleIndex)
-
+                           CamelCase TitleIndex TracNavigation TracFineGrainedPermissions TracWorkflow TimingAndEstimationPluginUserManual \
+                           PageTemplates)
       class TracWikiPage < ActiveRecord::Base
         set_table_name :wiki
         set_primary_key :name
@@ -207,7 +209,7 @@ namespace :redmine do
         has_many :attachments, :class_name => "TracAttachment",
                                :finder_sql => "SELECT DISTINCT attachment.* FROM #{TracMigrate::TracAttachment.table_name}" +
                                       " WHERE #{TracMigrate::TracAttachment.table_name}.type = 'wiki'" +
-                                      ' AND #{TracMigrate::TracAttachment.table_name}.id = \'#{TracMigrate::TracAttachment.connection.quote_string(id.to_s)}\''
+                                      ' AND #{TracMigrate::TracAttachment.table_name}.id = \"#{id}\"'
 
         def self.columns
           # Hides readonly Trac field to prevent clash with AR readonly? method (Rails 2.0)
@@ -241,13 +243,13 @@ namespace :redmine do
           if name_attr = TracSessionAttribute.find_by_sid_and_name(username, 'name')
             name = name_attr.value
           end
-          name =~ (/(.*)(\s+\w+)?/)
+          name =~ (/(.+?)(?:[\ \t]+(.+)?|[\ \t]+|)$/)
           fn = $1.strip
-          ln = ($2 || '-').strip
+          ln = ($2 || '').strip
 
           u = User.new :mail => mail.gsub(/[^-@a-z0-9\.]/i, '-'),
-                       :firstname => fn[0, limit_for(User, 'firstname')],
-                       :lastname => ln[0, limit_for(User, 'lastname')]
+                       :firstname => fn[0, limit_for(User, 'firstname')].gsub(/[^\w\s\'\-]/i, '-'),
+                       :lastname => ln[0, limit_for(User, 'lastname')].gsub(/[^\w\s\'\-]/i, '-')
 
           u.login = username[0,limit_for(User, 'login')].gsub(/[^a-z0-9_\-@\.]/i, '-')
           u.password = 'trac'
@@ -271,96 +273,7 @@ namespace :redmine do
 
       # Basic wiki syntax conversion
       def self.convert_wiki_text(text)
-        # Titles
-        text = text.gsub(/^(\=+)\s(.+)\s(\=+)/) {|s| "\nh#{$1.length}. #{$2}\n"}
-        # External Links
-        text = text.gsub(/\[(http[^\s]+)\s+([^\]]+)\]/) {|s| "\"#{$2}\":#{$1}"}
-        # Ticket links:
-        #      [ticket:234 Text],[ticket:234 This is a test]
-        text = text.gsub(/\[ticket\:([^\ ]+)\ (.+?)\]/, '"\2":/issues/show/\1')
-        #      ticket:1234
-        #      #1 is working cause Redmine uses the same syntax.
-        text = text.gsub(/ticket\:([^\ ]+)/, '#\1')
-        # Milestone links:
-        #      [milestone:"0.1.0 Mercury" Milestone 0.1.0 (Mercury)]
-        #      The text "Milestone 0.1.0 (Mercury)" is not converted,
-        #      cause Redmine's wiki does not support this.
-        text = text.gsub(/\[milestone\:\"([^\"]+)\"\ (.+?)\]/, 'version:"\1"')
-        #      [milestone:"0.1.0 Mercury"]
-        text = text.gsub(/\[milestone\:\"([^\"]+)\"\]/, 'version:"\1"')
-        text = text.gsub(/milestone\:\"([^\"]+)\"/, 'version:"\1"')
-        #      milestone:0.1.0
-        text = text.gsub(/\[milestone\:([^\ ]+)\]/, 'version:\1')
-        text = text.gsub(/milestone\:([^\ ]+)/, 'version:\1')
-        # Internal Links
-        text = text.gsub(/\[\[BR\]\]/, "\n") # This has to go before the rules below
-        text = text.gsub(/\[\"(.+)\".*\]/) {|s| "[[#{$1.delete(',./?;|:')}]]"}
-        text = text.gsub(/\[wiki:\"(.+)\".*\]/) {|s| "[[#{$1.delete(',./?;|:')}]]"}
-        text = text.gsub(/\[wiki:\"(.+)\".*\]/) {|s| "[[#{$1.delete(',./?;|:')}]]"}
-        text = text.gsub(/\[wiki:([^\s\]]+)\]/) {|s| "[[#{$1.delete(',./?;|:')}]]"}
-        text = text.gsub(/\[wiki:([^\s\]]+)\s(.*)\]/) {|s| "[[#{$1.delete(',./?;|:')}|#{$2.delete(',./?;|:')}]]"}
-
-  # Links to pages UsingJustWikiCaps
-  text = text.gsub(/([^!]|^)(^| )([A-Z][a-z]+[A-Z][a-zA-Z]+)/, '\\1\\2[[\3]]')
-  # Normalize things that were supposed to not be links
-  # like !NotALink
-  text = text.gsub(/(^| )!([A-Z][A-Za-z]+)/, '\1\2')
-        # Revisions links
-        text = text.gsub(/\[(\d+)\]/, 'r\1')
-        # Ticket number re-writing
-        text = text.gsub(/#(\d+)/) do |s|
-          if $1.length < 10
-#            TICKET_MAP[$1.to_i] ||= $1
-            "\##{TICKET_MAP[$1.to_i] || $1}"
-          else
-            s
-          end
-        end
-        # We would like to convert the Code highlighting too
-        # This will go into the next line.
-        shebang_line = false
-        # Reguar expression for start of code
-        pre_re = /\{\{\{/
-        # Code hightlighing...
-        shebang_re = /^\#\!([a-z]+)/
-        # Regular expression for end of code
-        pre_end_re = /\}\}\}/
-
-        # Go through the whole text..extract it line by line
-        text = text.gsub(/^(.*)$/) do |line|
-          m_pre = pre_re.match(line)
-          if m_pre
-            line = '<pre>'
-          else
-            m_sl = shebang_re.match(line)
-            if m_sl
-              shebang_line = true
-              line = '<code class="' + m_sl[1] + '">'
-            end
-            m_pre_end = pre_end_re.match(line)
-            if m_pre_end
-              line = '</pre>'
-              if shebang_line
-                line = '</code>' + line
-              end
-            end
-          end
-          line
-        end
-
-        # Highlighting
-        text = text.gsub(/'''''([^\s])/, '_*\1')
-        text = text.gsub(/([^\s])'''''/, '\1*_')
-        text = text.gsub(/'''/, '*')
-        text = text.gsub(/''/, '_')
-        text = text.gsub(/__/, '+')
-        text = text.gsub(/~~/, '-')
-        text = text.gsub(/`/, '@')
-        text = text.gsub(/,,/, '~')
-        # Lists
-        text = text.gsub(/^([ ]+)\* /) {|s| '*' * $1.length + " "}
-
-        text
+        convert_wiki_text_mapping(text, TICKET_MAP)
       end
 
       def self.migrate
@@ -377,32 +290,36 @@ namespace :redmine do
         migrated_wiki_edits = 0
         migrated_wiki_attachments = 0
 
-        #Wiki system initializing...
+        # Wiki system initializing...
         @target_project.wiki.destroy if @target_project.wiki
         @target_project.reload
         wiki = Wiki.new(:project => @target_project, :start_page => 'WikiStart')
         wiki_edit_count = 0
 
         # Components
-        print "Migrating components"
+        who = "Migrating components"
         issues_category_map = {}
+        components_total = TracComponent.count
         TracComponent.find(:all).each do |component|
-        print '.'
-        STDOUT.flush
           c = IssueCategory.new :project => @target_project,
                                 :name => encode(component.name[0, limit_for(IssueCategory, 'name')])
+        # Owner
+        unless component.owner.blank?
+          c.assigned_to = find_or_create_user(component.owner, true)
+        end
         next unless c.save
         issues_category_map[component.name] = c
         migrated_components += 1
+        simplebar(who, migrated_components, components_total)
         end
-        puts
+        puts if migrated_components < components_total
 
         # Milestones
-        print "Migrating milestones"
+        who = "Migrating milestones"
         version_map = {}
+        milestone_wiki = Array.new
+        milestones_total = TracMilestone.count
         TracMilestone.find(:all).each do |milestone|
-          print '.'
-          STDOUT.flush
           # First we try to find the wiki page...
           p = wiki.find_or_new_page(milestone.name.to_s)
           p.content = WikiContent.new(:page => p) if p.new_record?
@@ -419,17 +336,19 @@ namespace :redmine do
 
           next unless v.save
           version_map[milestone.name] = v
+          milestone_wiki.push(milestone.name);
           migrated_milestones += 1
+          simplebar(who, migrated_milestones, milestones_total)
         end
-        puts
+        puts if migrated_milestones < milestones_total
 
         # Custom fields
         # TODO: read trac.ini instead
-        print "Migrating custom fields"
+        #print "Migrating custom fields"
         custom_field_map = {}
         TracTicketCustom.find_by_sql("SELECT DISTINCT name FROM #{TracTicketCustom.table_name}").each do |field|
-          print '.'
-          STDOUT.flush
+          #print '.' # Maybe not needed this out?
+          #STDOUT.flush
           # Redmine custom field name
           field_name = encode(field.name[0, limit_for(IssueCustomField, 'name')]).humanize
           # Find if the custom already exists in Redmine
@@ -443,7 +362,7 @@ namespace :redmine do
           f.projects << @target_project
           custom_field_map[field.name] = f
         end
-        puts
+        #puts
 
         # Trac 'resolution' field as a Redmine custom field
         r = IssueCustomField.find(:first, :conditions => { :name => "Resolution" })
@@ -456,14 +375,33 @@ namespace :redmine do
         r.save!
         custom_field_map['resolution'] = r
 
+        # Trac 'keywords' field as a Redmine custom field
+        k = IssueCustomField.find(:first, :conditions => { :name => "Keywords" })
+        k = IssueCustomField.new(:name => 'Keywords',
+                                 :field_format => 'string',
+                                 :is_filter => true) if k.nil?
+        k.trackers = Tracker.find(:all)
+        k.projects << @target_project
+        k.save!
+        custom_field_map['keywords'] = k
+
+        # Trac ticket id as a Redmine custom field
+        tid = IssueCustomField.find(:first, :conditions => { :name => "TracID" })
+        tid = IssueCustomField.new(:name => 'TracID',
+                                 :field_format => 'string',
+                                 :is_filter => true) if tid.nil?
+        tid.trackers = Tracker.find(:all)
+        tid.projects << @target_project
+        tid.save!
+        custom_field_map['tracid'] = tid
+  
         # Tickets
-        print "Migrating tickets"
+        who = "Migrating tickets"
+          tickets_total = TracTicket.count
           TracTicket.find_each(:batch_size => 200) do |ticket|
-          print '.'
-          STDOUT.flush
           i = Issue.new :project => @target_project,
                           :subject => encode(ticket.summary[0, limit_for(Issue, 'subject')]),
-                          :description => convert_wiki_text(encode(ticket.description)),
+                          :description => encode(ticket.description),
                           :priority => PRIORITY_MAPPING[ticket.priority] || DEFAULT_PRIORITY,
                           :created_on => ticket.time
           i.author = find_or_create_user(ticket.reporter)
@@ -475,20 +413,21 @@ namespace :redmine do
           next unless Time.fake(ticket.changetime) { i.save }
           TICKET_MAP[ticket.id] = i.id
           migrated_tickets += 1
-
+          simplebar(who, migrated_tickets, tickets_total)
           # Owner
             unless ticket.owner.blank?
               i.assigned_to = find_or_create_user(ticket.owner, true)
               Time.fake(ticket.changetime) { i.save }
             end
 
-          # Comments and status/resolution changes
+          # Comments and status/resolution/keywords changes
           ticket.changes.group_by(&:time).each do |time, changeset|
               status_change = changeset.select {|change| change.field == 'status'}.first
               resolution_change = changeset.select {|change| change.field == 'resolution'}.first
+              keywords_change = changeset.select {|change| change.field == 'keywords'}.first
               comment_change = changeset.select {|change| change.field == 'comment'}.first
 
-              n = Journal.new :notes => (comment_change ? convert_wiki_text(encode(comment_change.newvalue)) : ''),
+              n = Journal.new :notes => (comment_change ? encode(comment_change.newvalue) : ''),
                               :created_on => time
               n.user = find_or_create_user(changeset.first.author)
               n.journalized = i
@@ -506,6 +445,12 @@ namespace :redmine do
                                                :prop_key => custom_field_map['resolution'].id,
                                                :old_value => resolution_change.oldvalue,
                                                :value => resolution_change.newvalue)
+              end
+              if keywords_change
+                n.details << JournalDetail.new(:property => 'cf',
+                                               :prop_key => custom_field_map['keywords'].id,
+                                               :old_value => keywords_change.oldvalue,
+                                               :value => keywords_change.newvalue)
               end
               n.save unless n.details.empty? && n.notes.blank?
           end
@@ -534,32 +479,40 @@ namespace :redmine do
           if custom_field_map['resolution'] && !ticket.resolution.blank?
             custom_values[custom_field_map['resolution'].id] = ticket.resolution
           end
+          if custom_field_map['keywords'] && !ticket.keywords.blank?
+            custom_values[custom_field_map['keywords'].id] = ticket.keywords
+          end
+          if custom_field_map['tracid'] 
+            custom_values[custom_field_map['tracid'].id] = ticket.id
+          end
           i.custom_field_values = custom_values
           i.save_custom_field_values
         end
 
         # update issue id sequence if needed (postgresql)
         Issue.connection.reset_pk_sequence!(Issue.table_name) if Issue.connection.respond_to?('reset_pk_sequence!')
-        puts
+        puts if migrated_tickets < tickets_total
 
         # Wiki
-        print "Migrating wiki"
+        who = "Migrating wiki"
         if wiki.save
+          wiki_edits_total = TracWikiPage.count
           TracWikiPage.find(:all, :order => 'name, version').each do |page|
             # Do not migrate Trac manual wiki pages
-            next if TRAC_WIKI_PAGES.include?(page.name)
-            wiki_edit_count += 1
-            print '.'
-            STDOUT.flush
+            if TRAC_WIKI_PAGES.include?(page.name) then
+              wiki_edits_total -= 1
+              next
+            end
             p = wiki.find_or_new_page(page.name)
             p.content = WikiContent.new(:page => p) if p.new_record?
             p.content.text = page.text
             p.content.author = find_or_create_user(page.author) unless page.author.blank? || page.author == 'trac'
             p.content.comments = page.comment
             Time.fake(page.time) { p.new_record? ? p.save : p.content.save }
+            migrated_wiki_edits += 1
+            simplebar(who, migrated_wiki_edits, wiki_edits_total)
 
             next if p.content.new_record?
-            migrated_wiki_edits += 1
 
             # Attachments
             page.attachments.each do |attachment|
@@ -576,24 +529,75 @@ namespace :redmine do
             end
           end
 
-          wiki.reload
-          wiki.pages.each do |page|
-            page.content.text = convert_wiki_text(page.content.text)
-            Time.fake(page.content.updated_on) { page.content.save }
+        end
+        puts if migrated_wiki_edits < wiki_edits_total
+
+        # Now load each wiki page and transform its content into textile format
+        puts "\nTransform texts to textile format:"
+    
+        wiki_pages_count = 0
+        issues_count = 0
+        milestone_wiki_count = 0
+
+        who = "   in Wiki pages"
+        wiki.reload
+        wiki_pages_total = wiki.pages.count
+        wiki.pages.each do |page|
+          page.content.text = convert_wiki_text(page.content.text)
+          Time.fake(page.content.updated_on) { page.content.save }
+          wiki_pages_count += 1
+          simplebar(who, wiki_pages_count, wiki_pages_total)
+        end
+        puts if wiki_pages_count < wiki_pages_total
+        
+        who = "   in Issues"
+        issues_total = TICKET_MAP.count
+        TICKET_MAP.each do |newId|
+          issues_count += 1
+          simplebar(who, issues_count, issues_total)
+          next if newId.nil?
+          issue = findIssue(newId)
+          next if issue.nil?
+          # convert issue description
+          issue.description = convert_wiki_text(issue.description)
+          issue.save
+          # convert issue journals
+          issue.journals.find(:all).each do |journal|
+            journal.notes = convert_wiki_text(journal.notes)
+            journal.save
           end
         end
-        puts
+        puts if issues_count < issues_total
+
+        who = "   in Milestone descriptions"
+        milestone_wiki_total = milestone_wiki.count
+        milestone_wiki.each do |name|
+          milestone_wiki_count += 1
+          simplebar(who, milestone_wiki_count, milestone_wiki_total)
+          p = wiki.find_page(name)            
+          next if p.nil?
+          p.content.text = convert_wiki_text(p.content.text)
+          p.content.save
+        end
+        puts if milestone_wiki_count < milestone_wiki_total
 
         puts
-        puts "Components:      #{migrated_components}/#{TracComponent.count}"
-        puts "Milestones:      #{migrated_milestones}/#{TracMilestone.count}"
-        puts "Tickets:         #{migrated_tickets}/#{TracTicket.count}"
+        puts "Components:      #{migrated_components}/#{components_total}"
+        puts "Milestones:      #{migrated_milestones}/#{milestones_total}"
+        puts "Tickets:         #{migrated_tickets}/#{tickets_total}"
         puts "Ticket files:    #{migrated_ticket_attachments}/" + TracAttachment.count(:conditions => {:type => 'ticket'}).to_s
         puts "Custom values:   #{migrated_custom_values}/#{TracTicketCustom.count}"
-        puts "Wiki edits:      #{migrated_wiki_edits}/#{wiki_edit_count}"
+        puts "Wiki edits:      #{migrated_wiki_edits}/#{wiki_edits_total}"
         puts "Wiki files:      #{migrated_wiki_attachments}/" + TracAttachment.count(:conditions => {:type => 'wiki'}).to_s
       end
-
+      
+      def self.findIssue(id)
+        return Issue.find(id)
+      rescue ActiveRecord::RecordNotFound
+        puts "[#{id}] not found"
+        nil
+      end
+      
       def self.limit_for(klass, attribute)
         klass.columns_hash[attribute.to_s].limit
       end
@@ -732,21 +736,10 @@ namespace :redmine do
     break unless STDIN.gets.match(/^y$/i)
     puts
 
-    def prompt(text, options = {}, &block)
-      default = options[:default] || ''
-      while true
-        print "#{text} [#{default}]: "
-        STDOUT.flush
-        value = STDIN.gets.chomp!
-        value = default if value.blank?
-        break if yield value
-      end
-    end
-
     DEFAULT_PORTS = {'mysql' => 3306, 'postgresql' => 5432}
 
     prompt('Trac directory') {|directory| TracMigrate.set_trac_directory directory.strip}
-    prompt('Trac database adapter (sqlite, sqlite3, mysql, postgresql)', :default => 'sqlite') {|adapter| TracMigrate.set_trac_adapter adapter}
+    prompt('Trac database adapter (sqlite, sqlite3, mysql, postgresql)', :default => 'sqlite3') {|adapter| TracMigrate.set_trac_adapter adapter}
     unless %w(sqlite sqlite3).include?(TracMigrate.trac_adapter)
       prompt('Trac database host', :default => 'localhost') {|host| TracMigrate.set_trac_db_host host}
       prompt('Trac database port', :default => DEFAULT_PORTS[TracMigrate.trac_adapter]) {|port| TracMigrate.set_trac_db_port port}
@@ -756,13 +749,416 @@ namespace :redmine do
       prompt('Trac database password') {|password| TracMigrate.set_trac_db_password password}
     end
     prompt('Trac database encoding', :default => 'UTF-8') {|encoding| TracMigrate.encoding encoding}
-    prompt('Target project identifier') {|identifier| TracMigrate.target_project_identifier identifier}
+    prompt('Target project identifier') {|identifier| TracMigrate.target_project_identifier identifier.downcase}
     puts
     
     # Turn off email notifications
     Setting.notified_events = []
     
     TracMigrate.migrate
+  end
+
+
+  desc 'Subversion migration script'
+  task :migrate_from_trac_svn => :environment do
+
+    require 'redmine/scm/adapters/abstract_adapter'
+    require 'redmine/scm/adapters/subversion_adapter'
+    require 'rexml/document'
+    require 'uri'
+    require 'tempfile'
+
+    module SvnMigrate 
+        TICKET_MAP = []
+
+        class Commit
+          attr_accessor :revision, :message
+          
+          def initialize(attributes={})
+            self.message = attributes[:message] || ""
+            self.revision = attributes[:revision]
+          end
+        end
+        
+        class SvnExtendedAdapter < Redmine::Scm::Adapters::SubversionAdapter
+
+            def set_message(path=nil, revision=nil, msg=nil)
+              path ||= ''
+
+              Tempfile.open('msg') do |tempfile|
+
+                # This is a weird thing. We need to cleanup cr/lf so we have uniform line separators              
+                tempfile.print msg.gsub(/\r\n/,'\n')
+                tempfile.flush
+
+                filePath = tempfile.path.gsub(File::SEPARATOR, File::ALT_SEPARATOR || File::SEPARATOR)
+
+                cmd = "#{SVN_BIN} propset svn:log --quiet --revprop -r #{revision}  -F \"#{filePath}\" "
+                cmd << credentials_string
+                cmd << ' ' + target(URI.escape(path))
+
+                shellout(cmd) do |io|
+                  begin
+                    loop do 
+                      line = io.readline
+                      puts line
+                    end
+                  rescue EOFError
+                  end  
+                end
+
+                raise if $? && $?.exitstatus != 0
+
+              end
+              
+            end
+        
+            def messages(path=nil)
+              path ||= ''
+
+              commits = Array.new
+
+              cmd = "#{SVN_BIN} log --xml -r 1:HEAD"
+              cmd << credentials_string
+              cmd << ' ' + target(URI.escape(path))
+                            
+              shellout(cmd) do |io|
+                begin
+                  doc = REXML::Document.new(io)
+                  doc.elements.each("log/logentry") do |logentry|
+
+                    commits << Commit.new(
+                                                {
+                                                  :revision => logentry.attributes['revision'].to_i,
+                                                  :message => logentry.elements['msg'].text
+                                                })
+                  end
+                rescue => e
+                  puts"Error !!!"
+                  puts e
+                end
+              end
+              return nil if $? && $?.exitstatus != 0
+              commits
+            end
+          
+        end
+        
+        def self.migrate
+
+          project = Project.find(@@redmine_project)
+          if !project
+            puts "Could not find project identifier '#{@@redmine_project}'"
+            raise 
+          end
+                    
+          tid = IssueCustomField.find(:first, :conditions => { :name => "TracID" })
+          if !tid
+            puts "Could not find issue custom field 'TracID'"
+            raise 
+          end
+          
+          Issue.find( :all, :conditions => { :project_id => project }).each do |issue|
+            val = nil
+            issue.custom_values.each do |value|
+              if value.custom_field.id == tid.id
+                val = value
+                break
+              end
+            end
+            
+            TICKET_MAP[val.value.to_i] = issue.id if !val.nil?            
+          end
+          
+          svn = self.scm          
+          msgs = svn.messages(@svn_url)
+          msgs.each do |commit| 
+          
+            newText = convert_wiki_text(commit.message)
+            
+            if newText != commit.message             
+              puts "Updating message #{commit.revision}"
+              scm.set_message(@svn_url, commit.revision, newText)
+            end
+          end
+          
+          
+        end
+        
+        # Basic wiki syntax conversion
+        def self.convert_wiki_text(text)
+          convert_wiki_text_mapping(text, TICKET_MAP)
+        end
+        
+        def self.set_svn_url(url)
+          @@svn_url = url
+        end
+
+        def self.set_svn_username(username)
+          @@svn_username = username
+        end
+
+        def self.set_svn_password(password)
+          @@svn_password = password
+        end
+
+        def self.set_redmine_project_identifier(identifier)
+          @@redmine_project = identifier
+        end
+      
+        def self.scm
+          @scm ||= SvnExtendedAdapter.new @@svn_url, @@svn_url, @@svn_username, @@svn_password, 0, "", nil
+          @scm
+        end
+    end
+
+    puts
+    if Redmine::DefaultData::Loader.no_data?
+      puts "Redmine configuration need to be loaded before importing data."
+      puts "Please, run this first:"
+      puts
+      puts "  rake redmine:load_default_data RAILS_ENV=\"#{ENV['RAILS_ENV']}\""
+      exit
+    end
+
+    puts "WARNING: all commit messages with references to trac pages will be modified"
+    print "Are you sure you want to continue ? [y/N] "
+    break unless STDIN.gets.match(/^y$/i)
+    puts
+
+    prompt('Subversion repository url') {|repository| SvnMigrate.set_svn_url repository.strip}
+    prompt('Subversion repository username') {|username| SvnMigrate.set_svn_username username}
+    prompt('Subversion repository password') {|password| SvnMigrate.set_svn_password password}
+    prompt('Redmine project identifier') {|identifier| SvnMigrate.set_redmine_project_identifier identifier}
+    puts
+
+    SvnMigrate.migrate
+    
+  end
+
+  # Prompt
+  def prompt(text, options = {}, &block)
+    default = options[:default] || ''
+    while true
+      print "#{text} [#{default}]: "
+      STDOUT.flush
+      value = STDIN.gets.chomp!
+      value = default if value.blank?
+      break if yield value
+    end
+  end
+
+  # Basic wiki syntax conversion
+  def convert_wiki_text_mapping(text, ticket_map = [])
+        # Hide links
+        def wiki_links_hide(src)
+          @wiki_links = []
+          @wiki_links_hash = "####WIKILINKS#{src.hash.to_s}####"
+          src.gsub(/(\[\[.+?\|.+?\]\])/) do
+            @wiki_links << $1
+            @wiki_links_hash
+          end
+        end
+        # Restore links
+        def wiki_links_restore(src)
+          @wiki_links.each do |s|
+            src = src.sub("#{@wiki_links_hash}", s.to_s)
+          end
+          src
+        end
+        # Hidding code blocks
+        def code_hide(src)
+          @code = []
+          @code_hash = "####CODEBLOCK#{src.hash.to_s}####"
+          src.gsub(/(\{\{\{.+?\}\}\}|`.+?`)/m) do
+            @code << $1
+            @code_hash
+          end
+        end
+        # Convert code blocks
+        def code_convert(src)
+          @code.each do |s|
+            s = s.to_s
+            if s =~ (/`(.+?)`/m) || s =~ (/\{\{\{(.+?)\}\}\}/) then
+              # inline code
+              s = s.replace("@#{$1}@")
+            else
+              # We would like to convert the Code highlighting too
+              # This will go into the next line.
+              shebang_line = false
+              # Reguar expression for start of code
+              pre_re = /\{\{\{/
+              # Code hightlighing...
+              shebang_re = /^\#\!([a-z]+)/
+              # Regular expression for end of code
+              pre_end_re = /\}\}\}/
+      
+              # Go through the whole text..extract it line by line
+              s = s.gsub(/^(.*)$/) do |line|
+                m_pre = pre_re.match(line)
+                if m_pre
+                  line = '<pre>'
+                else
+                  m_sl = shebang_re.match(line)
+                  if m_sl
+                    shebang_line = true
+                    line = '<code class="' + m_sl[1] + '">'
+                  end
+                  m_pre_end = pre_end_re.match(line)
+                  if m_pre_end
+                    line = '</pre>'
+                    if shebang_line
+                      line = '</code>' + line
+                    end
+                  end
+                end
+                line
+              end
+            end
+            src = src.sub("#{@code_hash}", s)
+          end
+          src
+        end
+
+        # Hide code blocks
+        text = code_hide(text)
+        # New line
+        text = text.gsub(/\[\[[Bb][Rr]\]\]/, "\n") # This has to go before the rules below
+        # Titles (only h1. to h6., and remove #...)
+        text = text.gsub(/(?:^|^\ +)(\={1,6})\ (.+)\ (?:\1)(?:\ *(\ \#.*))?/) {|s| "\nh#{$1.length}. #{$2}#{$3}\n"}
+        
+        # External Links:
+        #      [http://example.com/]
+        text = text.gsub(/\[((?:https?|s?ftp)\:\S+)\]/, '\1')
+        #      [http://example.com/ Example],[http://example.com/ "Example"]
+        #      [http://example.com/ "Example for "Example""] -> "Example for 'Example'":http://example.com/
+        text = text.gsub(/\[((?:https?|s?ftp)\:\S+)[\ \t]+([\"']?)(.+?)\2\]/) {|s| "\"#{$3.tr('"','\'')}\":#{$1}"}
+        #      [mailto:some@example.com],[mailto:"some@example.com"]
+        text = text.gsub(/\[mailto\:([\"']?)(.+?)\1\]/, '\2')
+        
+        # Ticket links:
+        #      [ticket:234 Text],[ticket:234 This is a test],[ticket:234 "This is a test"]
+        #      [ticket:234 "Test "with quotes""] -> "Test 'with quotes'":issues/show/234
+        text = text.gsub(/\[ticket\:(\d+)[\ \t]+([\"']?)(.+?)\2\]/) {|s| "\"#{$3.tr('"','\'')}\":/issues/show/#{$1}"}
+        #      ticket:1234
+        #      excluding ticket:1234:file.txt (used in macros)
+        #      #1 - working cause Redmine uses the same syntax.
+        text = text.gsub(/ticket\:(\d+?)([^\:])/, '#\1\2')
+
+        # Source & attachments links:
+        #      [source:/trunk/readme.txt Readme File],[source:"/trunk/readme.txt" Readme File],
+        #      [source:/trunk/readme.txt],[source:"/trunk/readme.txt"]
+        #       The text "Readme File" is not converted,
+        #       cause Redmine's wiki does not support this.
+        #      Attachments use same syntax.
+        text = text.gsub(/\[(source|attachment)\:([\"']?)([^\"']+?)\2(?:\ +(.+?))?\]/, '\1:"\3"')
+        #      source:"/trunk/readme.txt"
+        #      source:/trunk/readme.txt - working cause Redmine uses the same syntax.
+        text = text.gsub(/(source|attachment)\:([\"'])([^\"']+?)\2/, '\1:"\3"')
+
+        # Milestone links:
+        #      [milestone:"0.1.0 Mercury" Milestone 0.1.0 (Mercury)],
+        #      [milestone:"0.1.0 Mercury"],milestone:"0.1.0 Mercury"
+        #       The text "Milestone 0.1.0 (Mercury)" is not converted,
+        #       cause Redmine's wiki does not support this.
+        text = text.gsub(/\[milestone\:([\"'])([^\"']+?)\1(?:\ +(.+?))?\]/, 'version:"\2"')
+        text = text.gsub(/milestone\:([\"'])([^\"']+?)\1/, 'version:"\2"')
+        #      [milestone:0.1.0],milestone:0.1.0
+        text = text.gsub(/\[milestone\:([^\ ]+?)\]/, 'version:\1')
+        text = text.gsub(/milestone\:([^\ ]+?)/, 'version:\1')
+
+        # Internal Links:
+        #      ["Some Link"]
+        text = text.gsub(/\[([\"'])(.+?)\1\]/) {|s| "[[#{$2.delete(',./?;|:')}]]"}
+        #      [wiki:"Some Link" "Link description"],[wiki:"Some Link" Link description]
+        text = text.gsub(/\[wiki\:([\"'])([^\]\"']+?)\1[\ \t]+([\"']?)(.+?)\3\]/) {|s| "[[#{$2.delete(',./?;|:')}|#{$4}]]"}
+        #      [wiki:"Some Link"]
+        text = text.gsub(/\[wiki\:([\"'])([^\]\"']+?)\1\]/) {|s| "[[#{$2.delete(',./?;|:')}]]"}
+        #      [wiki:SomeLink]
+        text = text.gsub(/\[wiki\:([^\s\]]+?)\]/) {|s| "[[#{$1.delete(',./?;|:')}]]"}
+        #      [wiki:SomeLink Link description],[wiki:SomeLink "Link description"]
+        text = text.gsub(/\[wiki\:([^\s\]\"']+?)[\ \t]+([\"']?)(.+?)\2\]/) {|s| "[[#{$1.delete(',./?;|:')}|#{$3}]]"}
+
+        # Before convert CamelCase links, must hide wiki links with description.
+        # Like this: [[http://www.freebsd.org|Hello FreeBSD World]]
+        text = wiki_links_hide(text)
+        # Links to CamelCase pages (not work for unicode)
+        #      UsingJustWikiCaps,UsingJustWikiCaps/Subpage
+        text = text.gsub(/([^!]|^)(^| )([A-Z][a-z]+[A-Z][a-zA-Z]+(?:\/[^\s[:punct:]]+)*)/) {|s| "#{$1}#{$2}[[#{$3.delete('/')}]]"}
+        # Normalize things that were supposed to not be links
+        # like !NotALink
+        text = text.gsub(/(^| )!([A-Z][A-Za-z]+)/, '\1\2')
+        # Now restore hidden links
+        text = wiki_links_restore(text)
+        
+        # Revisions links
+        text = text.gsub(/\[(\d+)\]/, 'r\1')
+        # Ticket number re-writing
+        text = text.gsub(/#(\d+)/) do |s|
+          if $1.length < 10
+            #ticket_map[$1.to_i] ||= $1
+            "\##{ticket_map[$1.to_i] || $1}"
+          else
+            s
+          end
+        end
+        
+        # Highlighting
+        text = text.gsub(/'''''([^\s])/, '_*\1')
+        text = text.gsub(/([^\s])'''''/, '\1*_')
+        text = text.gsub(/'''/, '*')
+        text = text.gsub(/''/, '_')
+        text = text.gsub(/__/, '+')
+        text = text.gsub(/~~/, '-')
+        text = text.gsub(/,,/, '~')
+        # Tables
+        text = text.gsub(/\|\|/, '|')
+        # Lists:
+        #      bullet
+        text = text.gsub(/^(\ +)[\*-] /) {|s| '*' * $1.length + " "}
+        #      numbered
+        text = text.gsub(/^(\ +)\d+\. /) {|s| '#' * $1.length + " "}
+        # Images (work for only attached in current page [[Image(picture.gif)]])
+        # need rules for:  * [[Image(wiki:WikiFormatting:picture.gif)]] (referring to attachment on another page)
+        #                  * [[Image(ticket:1:picture.gif)]] (file attached to a ticket)
+        #                  * [[Image(htdocs:picture.gif)]] (referring to a file inside project htdocs)
+        #                  * [[Image(source:/trunk/trac/htdocs/trac_logo_mini.png)]] (a file in repository) 
+        text = text.gsub(/\[\[image\((.+?)(?:,.+?)?\)\]\]/i, '!\1!')
+        # TOC (is right-aligned, because that in Trac)
+        text = text.gsub(/\[\[TOC(?:\((.*?)\))?\]\]/m) {|s| "{{>toc}}\n"}
+
+        # Restore and convert code blocks
+        text = code_convert(text)
+
+        text
+  end
+  
+  # Simple progress bar
+  def simplebar(title, current, total, out = STDOUT)
+    def get_width
+      default_width = 80
+      begin
+        tiocgwinsz = 0x5413
+        data = [0, 0, 0, 0].pack("SSSS")
+        if out.ioctl(tiocgwinsz, data) >= 0 then
+          rows, cols, xpixels, ypixels = data.unpack("SSSS")
+          if cols >= 0 then cols else default_width end
+        else
+          default_width
+        end
+      rescue Exception
+        default_width
+      end
+    end
+    mark = "*"
+    title_width = 40
+    max = get_width - title_width - 10
+    format = "%-#{title_width}s [%-#{max}s] %3d%%  %s"
+    bar = current * max / total
+    percentage = bar * 100 / max
+    current == total ? eol = "\n" : eol ="\r"
+    printf(format, title, mark * bar, percentage, eol)
+    out.flush
   end
 end
 
