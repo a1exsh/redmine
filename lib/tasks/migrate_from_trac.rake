@@ -688,7 +688,7 @@ SELECT DISTINCT *
           puts "This project already exists in your Redmine database."
           print "Are you sure you want to append data to this project ? [Y/n] "
           STDOUT.flush
-          exit if STDIN.gets.match(/^n$/i)
+          exit if (ENV['FORCE_APPEND_DATA'] || STDIN.gets).match(/^n$/i)
         end
         project.trackers << TRACKER_BUG unless project.trackers.include?(TRACKER_BUG)
         project.trackers << TRACKER_FEATURE unless project.trackers.include?(TRACKER_FEATURE)
@@ -740,23 +740,23 @@ SELECT DISTINCT *
     puts "WARNING: a new project will be added to Redmine during this process."
     print "Are you sure you want to continue ? [y/N] "
     STDOUT.flush
-    break unless STDIN.gets.match(/^y$/i)
+    break unless (ENV['FORCE'] || STDIN.gets).match(/^y$/i)
     puts
 
     DEFAULT_PORTS = {'mysql' => 3306, 'postgresql' => 5432}
 
-    prompt('Trac directory') {|directory| TracMigrate.set_trac_directory directory.strip}
-    prompt('Trac database adapter (sqlite, sqlite3, mysql, postgresql)', :default => 'sqlite3') {|adapter| TracMigrate.set_trac_adapter adapter}
+    prompt_or_env('Trac directory', 'TRAC_DIR') {|directory| TracMigrate.set_trac_directory directory.strip}
+    prompt_or_env('Trac database adapter (sqlite, sqlite3, mysql, postgresql)', 'TRAC_DB_ADAPTER', :default => 'sqlite3') {|adapter| TracMigrate.set_trac_adapter adapter}
     unless %w(sqlite sqlite3).include?(TracMigrate.trac_adapter)
-      prompt('Trac database host', :default => 'localhost') {|host| TracMigrate.set_trac_db_host host}
-      prompt('Trac database port', :default => DEFAULT_PORTS[TracMigrate.trac_adapter]) {|port| TracMigrate.set_trac_db_port port}
-      prompt('Trac database name') {|name| TracMigrate.set_trac_db_name name}
-      prompt('Trac database schema', :default => 'public') {|schema| TracMigrate.set_trac_db_schema schema}
-      prompt('Trac database username') {|username| TracMigrate.set_trac_db_username username}
-      prompt('Trac database password') {|password| TracMigrate.set_trac_db_password password}
+      prompt_or_env('Trac database host', 'TRAC_DB_HOST', :default => 'localhost') {|host| TracMigrate.set_trac_db_host host}
+      prompt_or_env('Trac database port', 'TRAC_DB_PORT', :default => DEFAULT_PORTS[TracMigrate.trac_adapter]) {|port| TracMigrate.set_trac_db_port port}
+      prompt_or_env('Trac database name', 'TRAC_DB_NAME') {|name| TracMigrate.set_trac_db_name name}
+      prompt_or_env('Trac database schema', 'TRAC_DB_SCHEMA', :default => 'public') {|schema| TracMigrate.set_trac_db_schema schema}
+      prompt_or_env('Trac database username', 'TRAC_DB_USERNAME') {|username| TracMigrate.set_trac_db_username username}
+      prompt_or_env('Trac database password', 'TRAC_DB_PASSWORD') {|password| TracMigrate.set_trac_db_password password}
     end
-    prompt('Trac database encoding', :default => 'UTF-8') {|encoding| TracMigrate.encoding encoding}
-    prompt('Target project identifier') {|identifier| TracMigrate.target_project_identifier identifier.downcase}
+    prompt_or_env('Trac database encoding', 'TRAC_DB_ENCODING', :default => 'UTF-8') {|encoding| TracMigrate.encoding encoding}
+    prompt_or_env('Target project identifier', 'TARGET_PROJECT') {|identifier| TracMigrate.target_project_identifier identifier.downcase}
     puts
     
     # Turn off email notifications
@@ -946,12 +946,23 @@ SELECT DISTINCT *
   # Prompt
   def prompt(text, options = {}, &block)
     default = options[:default] || ''
-    while true
-      print "#{text} [#{default}]: "
-      STDOUT.flush
-      value = STDIN.gets.chomp!
-      value = default if value.blank?
-      break if yield value
+    unless default.blank?
+      yield default
+    else
+      while true
+        print "#{text} [#{default}]: "
+        STDOUT.flush
+        value = STDIN.gets.chomp!
+        value = default if value.blank?
+        break if yield value
+      end
+    end
+  end
+
+  def prompt_or_env(text, envvar, options = {}, &block)
+    options[:default] = ENV[envvar] if ENV.include? envvar
+    prompt(text, options) do |*args|
+      block.call(*args)
     end
   end
 
